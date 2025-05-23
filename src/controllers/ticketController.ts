@@ -22,6 +22,37 @@ export class TicketController {
     }
   }
 
+  public async getBookedTickets(req: Request, res: Response) {
+    const db = getDatabase();
+
+    try {
+      // You can pass either booking_id or pnr_number as query param
+      const { pnr_number } = req.query;
+
+      if (!pnr_number) {
+        return res
+          .status(400)
+          .json({ error: "booking_id or pnr_number is required" });
+      }
+
+      const result = await db("bookings")
+        .where({
+          pnr_number,
+        })
+        .join("passengers", "passengers.booking_id", "bookings.booking_id")
+        .join("tickets", "tickets.passenger_id", "passengers.passenger_id")
+        .leftJoin("berths", "tickets.berth_id", "berths.berth_id")
+        .where({
+          "tickets.status": "Confirmed",
+        }).select(["*", "tickets.status as ticketStatus", "passengers.status as passengerStatus", "berths.status as berthStatus"]);
+
+      res.json(result);
+    } catch (error) {
+      console.error("Error fetching booked tickets:", error);
+      res.status(500).json({ error: "Failed to fetch booked tickets" });
+    }
+  }
+
   public async bookTicket(req: Request, res: Response) {
     const db = getDatabase();
     const trx = await db.transaction();
@@ -45,6 +76,7 @@ export class TicketController {
         .insert({
           pnr_number: Math.random().toString(36).substring(2, 15),
           total_amount: 0,
+          train_id
         })
         .returning("booking_id");
 
@@ -225,6 +257,204 @@ export class TicketController {
       console.error("Error booking ticket:", error);
       res.status(500).json({
         error: "Failed to book ticket",
+        details: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  public async cancelTicket(req: Request, res: Response) {
+    const db = getDatabase();
+    const trx = await db.transaction();
+
+    try {
+      const { ticketId } = req.params;
+
+      if (!ticketId) {
+        return res.status(400).json({ error: "Ticket ID is required" });
+      }
+
+      // Get the ticket details with berth information
+      const ticket = await trx("tickets")
+        .where("ticket_id", ticketId)
+        .first()
+        .forUpdate();
+
+      if (!ticket) {
+        await trx.rollback();
+        return res.status(404).json({ error: "Ticket not found" });
+      }
+
+      // Get the train_id through the berth and coach relationship
+      let trainId: number | null = null;
+      
+      if (ticket.berth_id) {
+        const berthInfo = await trx("berths")
+          .join("coaches", "berths.coach_id", "coaches.coach_id")
+          .where("berths.berth_id", ticket.berth_id)
+          .select("coaches.train_id")
+          .first();
+
+        if (!berthInfo) {
+          await trx.rollback();
+          return res.status(404).json({ error: "Berth information not found" });
+        }
+        trainId = berthInfo.train_id;
+      } else {
+        // For waiting list tickets, we need to get train_id from the passenger's booking
+        const passengerInfo = await trx("passengers")
+          .join("bookings", "passengers.booking_id", "bookings.booking_id")
+          .where("passengers.passenger_id", ticket.passenger_id)
+          .select("bookings.train_id")
+          .first();
+
+        if (!passengerInfo) {
+          await trx.rollback();
+          return res.status(404).json({ error: "Passenger booking information not found" });
+        }
+        trainId = passengerInfo.train_id;
+      }
+
+      // Get the train state for updating seat counts
+      const trainState = await trx("train_states")
+        .where("train_id", trainId)
+        .first()
+        .forUpdate();
+
+      if (!trainState) {
+        await trx.rollback();
+        return res.status(404).json({ error: "Train state not found" });
+      }
+
+      let {
+        available_confirmed_seats: availableConfirmed,
+        available_rac_seats: availableRAC,
+        current_waiting_list,
+      } = trainState;
+
+      availableConfirmed = Number(availableConfirmed);
+      availableRAC = Number(availableRAC);
+      current_waiting_list = Number(current_waiting_list);
+
+      // Update the cancelled ticket status
+      await trx("tickets")
+        .where("ticket_id", ticketId)
+        .update({ status: "Cancelled" });
+
+      // If the cancelled ticket was confirmed, free up the berth
+      if (ticket.status === "Confirmed" && ticket.berth_id) {
+        await trx("berths")
+          .where("berth_id", ticket.berth_id)
+          .update({ status: "Available" });
+        availableConfirmed++;
+      }
+
+      // If the cancelled ticket was RAC, free up the RAC berth
+      if (ticket.status === "RAC" && ticket.berth_id) {
+        await trx("berths")
+          .where("berth_id", ticket.berth_id)
+          .update({ status: "Available" });
+        availableRAC++;
+      }
+
+      // If the cancelled ticket was waiting, decrease waiting list
+      if (ticket.status === "Waiting") {
+        current_waiting_list--;
+      }
+
+      // Promote RAC to Confirmed if possible
+      if (availableConfirmed > 0) {
+        const nextRACTicket = await trx("tickets")
+          .where("status", "RAC")
+          .andWhere("ticket_id", "!=", ticketId) // Exclude the cancelled ticket
+          .first()
+          .forUpdate();
+
+        if (nextRACTicket) {
+          // Find an available berth for the promoted RAC ticket
+          const availableBerth = await trx("berths")
+            .join("coaches", "berths.coach_id", "coaches.coach_id")
+            .where("coaches.train_id", trainId)
+            .andWhere("berths.status", "Available")
+            .andWhere("berths.is_rac", false)
+            .first()
+            .forUpdate();
+
+          if (availableBerth) {
+            await trx("tickets")
+              .where("ticket_id", nextRACTicket.ticket_id)
+              .update({
+                status: "Confirmed",
+                berth_id: availableBerth.berth_id,
+              });
+
+            await trx("berths")
+              .where("berth_id", availableBerth.berth_id)
+              .update({ status: "Booked" });
+
+            availableConfirmed--;
+            availableRAC++;
+          }
+        }
+      }
+
+      // Promote Waiting to RAC if possible
+      if (availableRAC > 0) {
+        const nextWaitingTicket = await trx("tickets")
+          .where("status", "Waiting")
+          .andWhere("ticket_id", "!=", ticketId) // Exclude the cancelled ticket
+          .first()
+          .forUpdate();
+
+        if (nextWaitingTicket) {
+          // Find an available RAC berth
+          const availableRACBerth = await trx("berths")
+            .join("coaches", "berths.coach_id", "coaches.coach_id")
+            .where("coaches.train_id", trainId)
+            .andWhere("berths.status", "Available")
+            .andWhere("berths.is_rac", true)
+            .first()
+            .forUpdate();
+
+          if (availableRACBerth) {
+            await trx("tickets")
+              .where("ticket_id", nextWaitingTicket.ticket_id)
+              .update({
+                status: "RAC",
+                berth_id: availableRACBerth.berth_id,
+              });
+
+            await trx("berths")
+              .where("berth_id", availableRACBerth.berth_id)
+              .update({ status: "RAC" });
+
+            availableRAC--;
+            current_waiting_list--;
+          }
+        }
+      }
+
+      // Update train state
+      await trx("train_states")
+        .where("train_id", trainId)
+        .update({
+          available_confirmed_seats: availableConfirmed,
+          available_rac_seats: availableRAC,
+          current_waiting_list,
+        });
+
+      await trx.commit();
+
+      res.json({
+        message: "Ticket cancelled successfully",
+        ticketId,
+        previousStatus: ticket.status,
+        trainId,
+      });
+    } catch (error) {
+      await trx.rollback();
+      console.error("Error cancelling ticket:", error);
+      res.status(500).json({
+        error: "Failed to cancel ticket",
         details: error instanceof Error ? error.message : "Unknown error",
       });
     }

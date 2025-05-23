@@ -5,6 +5,7 @@ export async function up(knex: Knex): Promise<void> {
     table.increments('booking_id').primary();
     table.string('pnr_number').notNullable().unique();
     table.decimal('total_amount', 10, 2).notNullable();
+    table.integer('train_id').notNullable().references('train_id').inTable('trains');
     table.timestamp('created_at').defaultTo(knex.fn.now());
     table.timestamp('updated_at').defaultTo(knex.fn.now());
   });
