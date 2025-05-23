@@ -52,6 +52,9 @@ docker-compose exec app pnpm run seed --knexfile src/knexfile.ts
 - `GET /api/v1/tickets/booked` - get booked tickets
 - `POST /api/v1/tickets/book` - Book tickets
 - `DELETE /cancel/:ticketId` - DELETE ticket
+### Trains
+- `GET /api/v1/train` - Get all train details
+
 
 ## Example Payload for Booking Tickets
 ```bash
