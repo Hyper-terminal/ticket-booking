@@ -12,12 +12,12 @@ services:
       - DB_NAME=ticket_booking
     depends_on:
       - postgres
-    volumes:
-      - .:/app
-      - /app/node_modules
+    # volumes:
+    #   - .:/app
+    #   - /app/node_modules
     command: >
       sh -c "pnpm install &&
-             pnpm run dev"
+             pnpm run dev" 
 
   postgres:
     image: postgres:16-alpine
