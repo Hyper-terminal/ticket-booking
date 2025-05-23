@@ -47,15 +47,8 @@ docker-compose exec app pnpm run seed --knexfile src/knexfile.ts
 ```
 
 ## API Endpoints
-
-### Trains
-- `GET /api/v1/trains` - List all trains
-- `GET /api/v1/trains/:id` - Get train details
-
-### Bookings
-- `POST /api/v1/bookings` - Create booking
-- `GET /api/v1/bookings/:pnr` - Get booking details
-
 ### Tickets
 - `GET /api/v1/tickets/available` - Check availability
+- `GET /api/v1/tickets/booked` - get booked tickets
 - `POST /api/v1/tickets/book` - Book tickets
+- `DELETE /cancel/:ticketId` - DELETE ticket
