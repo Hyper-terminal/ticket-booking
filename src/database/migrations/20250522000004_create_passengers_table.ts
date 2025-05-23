@@ -10,6 +10,7 @@ export async function up(knex: Knex): Promise<void> {
     table.timestamp('created_at').defaultTo(knex.fn.now());
     table.timestamp('updated_at').defaultTo(knex.fn.now());
     table.enum('status', ['Confirmed', 'Cancelled', 'Waiting']).defaultTo('Confirmed');
+    table.boolean('is_traveling_with_child').defaultTo(false).nullable();
   });
 }
 

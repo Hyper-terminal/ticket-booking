@@ -6,7 +6,7 @@ const ticketController = new TicketController();
 const router = Router();
 
 // Book a new ticket
-// router.post('/book', ticketController.bookTicket);
+router.post('/book', ticketController.bookTicket);
 
 // // Cancel a ticket
 // router.post('/cancel/:ticketId', ticketController.cancelTicket);
